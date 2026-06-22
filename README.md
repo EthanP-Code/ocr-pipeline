@@ -30,6 +30,7 @@ preprocessing.
 - [Setup](#setup)
 - [Usage](#usage)
 - [Results](#results)
+- [Reporting Dashboard](#reporting-dashboard)
 - [What I Learned](#what-i-learned)
 - [Possible Extensions](#possible-extensions)
 
@@ -111,7 +112,12 @@ ocr-document-pipeline/
 │   └── processed/
 │       ├── azure_cache/        # Cached raw Azure responses (JSON)
 │       ├── predictions/        # Parser output (FUNSD-format JSON)
-│       └── audit_log.json      # Seed + list of images used in last run
+│       ├── audit_log.json      # Seed + list of images used in last run
+│       └── results.csv         # Per-document CER/WER, input to dashboard
+│
+├── dashboard/
+│   ├── ocr_qa_dashboard.pbix    # Power BI dashboard file
+│   └── results.csv              # Source data for the dashboard
 │
 ├── notebooks/
 │   └── exploring_OpenCV.ipynb  # OpenCV preprocessing experiments + notes
@@ -283,6 +289,37 @@ Pipeline run on a sample of **20 images** from the FUNSD dataset
 
 ---
 
+## Reporting Dashboard
+
+To make pipeline accuracy results reviewable without reading raw JSON or
+CSVs, the results table above was loaded into a Power BI dashboard for
+visual QA reporting.
+
+![OCR Pipeline Dashboard](docs/dashboard_screenshot.png)
+
+The dashboard surfaces:
+
+- **Per-document CER/WER comparison** (sorted descending by CER), so the
+  worst-performing documents are immediately visible rather than buried in
+  a table.
+- **Summary KPIs**: average CER, average WER, and total documents processed.
+- **A flagged-documents table**: any document with CER above 20% is marked
+  for review, with conditional-formatting color scaling so high-error
+  documents stand out without reading exact numbers.
+- **Error distribution by band** (0–10%, 10–20%, 20–30%, 30%+), showing
+  that 16 of 20 documents fall under 20% CER, with a small number of
+  outliers driving most of the average error up.
+
+This reframes the pipeline's output from a one-off accuracy script into
+something closer to an ongoing QA/reporting tool, the kind of dashboard
+a team would actually check after each batch run to decide which documents
+need manual review.
+
+The `.pbix` file and source CSV are in the [`dashboard/`](dashboard/)
+folder.
+
+---
+
 ## Known Limitations
 
 - **CER/WER measure text accuracy, not structural accuracy.** The evaluation
@@ -389,6 +426,10 @@ Pipeline run on a sample of **20 images** from the FUNSD dataset
   (e.g. SQLite) as `(document, label, text, box, linking)` records, framing
   the pipeline's output as queryable "biological database records" rather
   than standalone JSON files.
+- **Live-connected dashboard**: currently the Power BI dashboard reads a
+  static CSV snapshot. Connecting it directly to a SQL database (see SQL
+  storage extension above) would let it refresh automatically as new
+  documents are processed, rather than requiring a manual export each run.
 - **Label/linking accuracy metric**: in addition to CER/WER on raw text,
   measure how often Azure's key-value pairs correctly match FUNSD's
   question→answer links, a more direct proxy for "did we extract the right
