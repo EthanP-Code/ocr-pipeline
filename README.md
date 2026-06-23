@@ -31,6 +31,7 @@ preprocessing.
 - [Usage](#usage)
 - [Results](#results)
 - [Reporting Dashboard](#reporting-dashboard)
+- [Database & Query Layer](#database--query-layer)
 - [What I Learned](#what-i-learned)
 - [Possible Extensions](#possible-extensions)
 
@@ -91,8 +92,14 @@ JSON, normalizes it (lowercase, strip punctuation), and computes CER/WER using
 
 **`pipeline.py`** — ties it all together: selects a seeded random sample of
 images, logs the selection to `data/processed/audit_log.json` for
-reproducibility, runs each image through the steps above, and prints a final
-accuracy summary.
+reproducibility, runs each image through the steps above, prints a final
+accuracy summary, and writes all results to the SQLite database.
+
+**`database.py`** — initializes the SQLite database schema (`runs`,
+`documents`, `elements`) and provides insert functions called by
+`pipeline.py` after each document is evaluated. Stores per-document CER/WER,
+flagged status, and all extracted FUNSD elements with bounding box coordinates
+for downstream querying.
 
 ---
 
@@ -122,11 +129,15 @@ ocr-document-pipeline/
 ├── notebooks/
 │   └── exploring_OpenCV.ipynb  # OpenCV preprocessing experiments + notes
 │
+├── scripts/
+│   └── query_results.py        # SQL queries for QA review and run summaries
+│
 ├── src/
 │   ├── __init__.py
 │   ├── azure_client.py         # Azure Document Intelligence calls + caching
-│   ├── parser.py                # Azure JSON -> FUNSD format
-│   └── evaluator.py              # CER / WER scoring against FUNSD ground truth
+│   ├── database.py             # SQLite schema, init, and insert functions
+│   ├── parser.py               # Azure JSON -> FUNSD format
+│   └── evaluator.py            # CER / WER scoring against FUNSD ground truth
 │
 ├── tests/
 │   ├── test_parser.py
@@ -320,6 +331,89 @@ folder.
 
 ---
 
+## Database & Query Layer
+
+To move pipeline output beyond flat JSON files and into a queryable format,
+results are automatically inserted into a normalized SQLite database at the
+end of each run (`data/processed/pipeline_results.db`).
+
+### Schema
+
+Three tables capture the full run context:
+
+- **`runs`** — one row per pipeline execution, storing the random seed and
+  timestamp for reproducibility.
+- **`documents`** — one row per processed image, storing CER, WER, and a
+  `flagged` column (1 if CER > 20%) to support automated QA triage.
+- **`elements`** — one row per extracted FUNSD form element, storing label
+  type (`question`/`answer`/`header`/`other`), text content, and bounding
+  box coordinates.
+
+This structure lets the pipeline's output be queried relationally rather
+than parsed document-by-document from JSON.
+
+### Analytical Queries
+
+`scripts/query_results.py` runs three queries against the database:
+
+**Query 1 — Documents flagged for manual review (CER > 20%)**
+```sql
+SELECT filename, ROUND(cer * 100, 2), ROUND(wer * 100, 2)
+FROM   documents
+WHERE  flagged = 1
+ORDER  BY cer DESC;
+```
+
+**Query 2 — Extracted element count by label type**
+```sql
+SELECT label, COUNT(*) AS total, COUNT(DISTINCT doc_id) AS docs_present
+FROM   elements
+GROUP  BY label
+ORDER  BY total DESC;
+```
+
+**Query 3 — Per-run accuracy summary**
+```sql
+SELECT r.run_date, r.seed, COUNT(d.doc_id),
+       ROUND(AVG(d.cer) * 100, 2), ROUND(AVG(d.wer) * 100, 2),
+       SUM(d.flagged)
+FROM   runs r JOIN documents d ON r.run_id = d.run_id
+GROUP  BY r.run_id;
+```
+
+Run the queries with:
+```bash
+python scripts/query_results.py
+```
+
+Sample output from seed 42 (20-document run):
+
+```
+QUERY 1 — Documents Flagged for Manual Review (CER > 20%)
+Filename                    CER %   WER %
+------------------------------------------
+0060136394.png              36.63   46.84
+0060262650.png              23.43   32.56
+82254638.png                23.23   28.26
+0001239897.png              22.64   41.54
+4 document(s) flagged for review.
+
+QUERY 2 — Extracted Elements by Label Type
+Label          Total Elements  Docs Containing
+----------------------------------------------
+question                  287              20
+answer                    223              20
+other                     173              19
+header                     84              18
+
+QUERY 3 — Per-Run Accuracy Summary
+Run Date                    Seed  Docs  Avg CER%  Avg WER%  Flagged
+--------------------------------------------------------------------
+2026-06-23T17:58:20          42    20     12.28     25.98        4
+```
+
+---
+
 ## Known Limitations
 
 - **CER/WER measure text accuracy, not structural accuracy.** The evaluation
@@ -422,10 +516,14 @@ folder.
 
 ## Possible Extensions
 
-- **SQL storage**: insert parsed FUNSD elements into a lightweight database
-  (e.g. SQLite) as `(document, label, text, box, linking)` records, framing
-  the pipeline's output as queryable "biological database records" rather
-  than standalone JSON files.
+- **Expand the schema for field-linking accuracy**: add a `links` table
+  storing predicted question→answer pairs and compare them against FUNSD's
+  ground-truth `linking` arrays. This would expose structural accuracy
+  separately from text accuracy — the more meaningful signal for a real
+  data-entry pipeline.
+- **Live-connected dashboard**: connect the Power BI dashboard directly to
+  `pipeline_results.db` rather than a static CSV, so it refreshes
+  automatically after each pipeline run without requiring a manual export.
 - **Live-connected dashboard**: currently the Power BI dashboard reads a
   static CSV snapshot. Connecting it directly to a SQL database (see SQL
   storage extension above) would let it refresh automatically as new

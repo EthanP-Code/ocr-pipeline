@@ -17,6 +17,10 @@ import src.azure_client as azure_client
 from src.parser import AzureToFUNSDParser
 from src.evaluator import OCREvaluator
 
+# DB specific imports
+from datetime import datetime
+from src.database import init_db, insert_run, insert_document, insert_elements, DB_PATH
+
 # ==========================================
 # Configuration & Paths
 # ==========================================
@@ -53,6 +57,10 @@ def select_images(image_dir, num_images, seed):
 
 def run_pipeline():
     ensure_directories()
+    
+    # Initialize database for this run
+    con = init_db()
+    run_id = insert_run(con, RANDOM_SEED, datetime.now().isoformat())
     
     # ---------------------------------------------------------
     # 1. Image Selection & Audit Logging
@@ -97,9 +105,21 @@ def run_pipeline():
             # Step C: Save prediction to disk
             output_file = OUTPUT_DIR / f"{img_path.stem}.json"
             parser.export_to_json(output_file)
+
+            # Step D: Store results in SQLite using evaluator's own scoring logic
+            annotation_path = ANNOTATION_DIR / f"{img_path.stem}.json"
+            metrics = evaluator.evaluate_single_document(annotation_path, output_file)
+
+            with open(output_file, encoding='utf-8') as f:
+                pred_data = json.load(f)
+
+            doc_id = insert_document(con, run_id, img_path.name, metrics["cer"], metrics["wer"])
+            insert_elements(con, doc_id, pred_data)
             
         except Exception as e:
+            import traceback
             print(f"  -> Error processing {img_path.name}: {e}")
+            traceback.print_exc()
 
     # ---------------------------------------------------------
     # 3. Final Pipeline Evaluation
@@ -112,6 +132,9 @@ def run_pipeline():
         truth_dir=ANNOTATION_DIR,
         pred_dir=OUTPUT_DIR
     )
+
+    con.close()
+    print(f"\nResults saved to: {DB_PATH}")
 
 if __name__ == "__main__":
     # Optional: Clear out old predictions before running to ensure a clean evaluation
